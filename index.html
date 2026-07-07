@@ -249,7 +249,9 @@
     BF.QR_CODE, BF.EAN_13, BF.EAN_8, BF.UPC_A, BF.UPC_E,
     BF.CODE_128, BF.CODE_39, BF.CODE_93, BF.ITF, BF.CODABAR, BF.DATA_MATRIX
   ]);
-  var reader = new ZXing.BrowserMultiFormatReader(hints, 320); // ~3 scans/sec
+  // TRY_HARDER makes the 1D readers also try rotated / lower-contrast codes.
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  var reader = new ZXing.BrowserMultiFormatReader(hints); // we drive our own scan loop below
 
   // ---- state ----
   var S = {
@@ -447,7 +449,36 @@
   });
 
   // ---- camera control ----
-  function stop(){ try{reader.reset()}catch(e){} S.running=false; S.track=null; S.torchOn=false; torchBtn.classList.remove("on"); }
+  var scanTimer=null, roiCanvas=null, roiCtx=null;
+  var LumSrc=ZXing.HTMLCanvasElementLuminanceSource, Hybrid=ZXing.HybridBinarizer, Bitmap=ZXing.BinaryBitmap;
+
+  function stop(){
+    if(scanTimer){ clearTimeout(scanTimer); scanTimer=null; }
+    try{ if(video.srcObject) video.srcObject.getTracks().forEach(function(t){t.stop();}); }catch(e){}
+    video.srcObject=null;
+    S.running=false; S.track=null; S.torchOn=false; torchBtn.classList.remove("on");
+  }
+
+  // Decode only the centered region of the frame, as fast as the device allows.
+  // 1D barcodes read far more reliably when the binarizer isn't fighting the whole
+  // busy frame, and a self-pacing loop catches the brief in-focus moments.
+  function scanTick(){
+    scanTimer=null;
+    if(!S.running) return;
+    try{
+      var vw=video.videoWidth, vh=video.videoHeight;
+      if(vw && vh && video.readyState>=2){
+        var rw=Math.round(vw*0.82), rh=Math.round(vh*0.60);   // central region of interest
+        var rx=(vw-rw)>>1, ry=(vh-rh)>>1;
+        if(!roiCanvas){ roiCanvas=document.createElement("canvas"); roiCtx=roiCanvas.getContext("2d",{willReadFrequently:true}); }
+        if(roiCanvas.width!==rw||roiCanvas.height!==rh){ roiCanvas.width=rw; roiCanvas.height=rh; }
+        roiCtx.drawImage(video, rx,ry,rw,rh, 0,0,rw,rh);
+        var result=reader.decodeBitmap(new Bitmap(new Hybrid(new LumSrc(roiCanvas))));
+        if(result) onDecode(result);
+      }
+    }catch(e){ /* NotFoundException on most frames — just try the next one */ }
+    scanTimer=setTimeout(scanTick, 80);
+  }
 
   // Ask for a high-resolution back camera. ZXing decodes off the video's
   // intrinsic frame, so a bigger stream = sharper source = better reads.
@@ -473,16 +504,17 @@
     }catch(e){}
   }
 
-  function onCameraReady(){
+  function onCameraReady(stream){
     camnote.style.display="none";
+    video.srcObject=stream;
+    var p=video.play(); if(p&&p.catch) p.catch(function(){});
     S.running=true;
-    var stream=video.srcObject;
-    if(stream){
-      S.track=stream.getVideoTracks()[0];
-      tuneTrack(S.track);
-      try{ var caps=S.track.getCapabilities&&S.track.getCapabilities(); if(caps&&caps.torch) torchBtn.style.display="block"; }catch(e){}
-    }
+    S.track=stream.getVideoTracks()[0];
+    tuneTrack(S.track);
+    try{ var caps=S.track.getCapabilities&&S.track.getCapabilities(); if(caps&&caps.torch) torchBtn.style.display="block"; }catch(e){}
     refreshDevices();
+    if(scanTimer) clearTimeout(scanTimer);
+    scanTimer=setTimeout(scanTick, 120);
   }
 
   function cameraFailed(e){
@@ -492,14 +524,14 @@
 
   function start(deviceId){
     stop();
-    var cb=function(result,err){ if(result) onDecode(result); };
-    reader.decodeFromConstraints(buildConstraints(deviceId), video, cb)
+    var md=navigator.mediaDevices;
+    if(!md||!md.getUserMedia){ cameraFailed(new Error("getUserMedia not supported")); return; }
+    md.getUserMedia(buildConstraints(deviceId))
       .then(onCameraReady)
       .catch(function(e){
-        // High-res request rejected (e.g. OverconstrainedError) — fall back to defaults.
-        reader.decodeFromVideoDevice(deviceId||null, video, cb)
-          .then(onCameraReady)
-          .catch(cameraFailed);
+        // High-res / exact-device request rejected — retry with relaxed constraints.
+        var v = deviceId ? {deviceId:{ideal:deviceId}} : {facingMode:{ideal:"environment"}};
+        md.getUserMedia({audio:false, video:v}).then(onCameraReady).catch(cameraFailed);
       });
   }
 
