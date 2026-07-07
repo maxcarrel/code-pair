@@ -237,15 +237,16 @@
 (function(){
   "use strict";
   var BF = ZXing.BarcodeFormat;
-  // formats we care about: QR (2D) + common 1D barcodes
+  // Both codes are 1D barcodes — restrict to 1D formats so the (JS fallback)
+  // reader tries far fewer decoders per frame. No TRY_HARDER: it roughly triples
+  // per-frame cost, and the native detector below carries speed where it exists.
+  var ONED = [
+    BF.EAN_13, BF.EAN_8, BF.UPC_A, BF.UPC_E,
+    BF.CODE_128, BF.CODE_39, BF.CODE_93, BF.ITF, BF.CODABAR
+  ];
   var hints = new Map();
-  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-    BF.QR_CODE, BF.EAN_13, BF.EAN_8, BF.UPC_A, BF.UPC_E,
-    BF.CODE_128, BF.CODE_39, BF.CODE_93, BF.ITF, BF.CODABAR, BF.DATA_MATRIX
-  ]);
-  // TRY_HARDER makes the 1D readers also try rotated / lower-contrast codes.
-  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  var reader = new ZXing.BrowserMultiFormatReader(hints); // we drive our own scan loop below
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, ONED);
+  var reader = new ZXing.BrowserMultiFormatReader(hints); // JS fallback; we drive our own scan loop below
 
   // ---- state ----
   // Both codes are barcodes now: "bar" = SIM card (left), "qr" = gateway (right).
@@ -312,9 +313,8 @@
 
   // ---- decoding callback ----
   var last={val:null, at:0};
-  function onDecode(result){
-    if(!result) return;
-    var text = result.getText();
+  function handleValue(text){
+    if(!text) return;
     var now = Date.now();
     // debounce identical rapid reads
     if(text===last.val && now-last.at<1200) return;
@@ -443,32 +443,66 @@
   var scanTimer=null, roiCanvas=null, roiCtx=null;
   var LumSrc=ZXing.HTMLCanvasElementLuminanceSource, Hybrid=ZXing.HybridBinarizer, Bitmap=ZXing.BinaryBitmap;
 
+  // Native barcode engine (ML Kit / BarcodeDetector) — hardware-accelerated and
+  // far faster than the JS decoder. Used when the device has it (e.g. Android
+  // Chrome/WebView); we fall back to ZXing otherwise (e.g. iOS Safari).
+  var useNative=(typeof window.BarcodeDetector==="function"), detector=null, detectBusy=false;
+  function getDetector(){
+    if(detector) return detector;
+    try{ detector=new window.BarcodeDetector({formats:["code_128","code_39","code_93","codabar","ean_13","ean_8","upc_a","upc_e","itf"]}); }
+    catch(e){ try{ detector=new window.BarcodeDetector(); }catch(e2){ useNative=false; } }
+    return detector;
+  }
+
   function stop(){
     if(scanTimer){ clearTimeout(scanTimer); scanTimer=null; }
+    detectBusy=false;
     try{ if(video.srcObject) video.srcObject.getTracks().forEach(function(t){t.stop();}); }catch(e){}
     video.srcObject=null;
     S.running=false; S.track=null; S.torchOn=false; torchBtn.classList.remove("on");
   }
 
-  // Decode only the centered region of the frame, as fast as the device allows.
-  // 1D barcodes read far more reliably when the binarizer isn't fighting the whole
-  // busy frame, and a self-pacing loop catches the brief in-focus moments.
+  function next(ms){ if(S.running) scanTimer=setTimeout(scanTick, ms); }
+
+  // Grab the centered region of the frame into a canvas, downscaled so neither
+  // decoder chews through more pixels than a 1D barcode needs. Returns false if
+  // the video isn't ready yet.
+  var MAXW=1000;
+  function grabROI(){
+    var vw=video.videoWidth, vh=video.videoHeight;
+    if(!(vw && vh && video.readyState>=2)) return false;
+    var rw=Math.round(vw*0.82), rh=Math.round(vh*0.60);       // central region of interest
+    var rx=(vw-rw)>>1, ry=(vh-rh)>>1;
+    var sc=Math.min(1, MAXW/rw), cw=Math.round(rw*sc), ch=Math.round(rh*sc);
+    if(!roiCanvas){ roiCanvas=document.createElement("canvas"); roiCtx=roiCanvas.getContext("2d",{willReadFrequently:true}); }
+    if(roiCanvas.width!==cw||roiCanvas.height!==ch){ roiCanvas.width=cw; roiCanvas.height=ch; }
+    roiCtx.drawImage(video, rx,ry,rw,rh, 0,0,cw,ch);
+    return true;
+  }
+
+  // Decode the ROI as fast as the device allows; a self-pacing loop catches the
+  // brief in-focus moments without piling work up on the main thread.
   function scanTick(){
     scanTimer=null;
     if(!S.running) return;
-    try{
-      var vw=video.videoWidth, vh=video.videoHeight;
-      if(vw && vh && video.readyState>=2){
-        var rw=Math.round(vw*0.82), rh=Math.round(vh*0.60);   // central region of interest
-        var rx=(vw-rw)>>1, ry=(vh-rh)>>1;
-        if(!roiCanvas){ roiCanvas=document.createElement("canvas"); roiCtx=roiCanvas.getContext("2d",{willReadFrequently:true}); }
-        if(roiCanvas.width!==rw||roiCanvas.height!==rh){ roiCanvas.width=rw; roiCanvas.height=rh; }
-        roiCtx.drawImage(video, rx,ry,rw,rh, 0,0,rw,rh);
-        var result=reader.decodeBitmap(new Bitmap(new Hybrid(new LumSrc(roiCanvas))));
-        if(result) onDecode(result);
+    if(!grabROI()){ next(60); return; }
+
+    if(useNative){
+      var d=getDetector();
+      if(d){
+        if(detectBusy){ next(20); return; }   // don't queue detects on top of each other
+        detectBusy=true;
+        d.detect(roiCanvas).then(function(codes){
+          if(codes && codes.length) handleValue(codes[0].rawValue);
+        }).catch(function(){ useNative=false; })   // native failed → use ZXing from here on
+        .then(function(){ detectBusy=false; next(useNative?20:70); });
+        return;
       }
-    }catch(e){ /* NotFoundException on most frames — just try the next one */ }
-    scanTimer=setTimeout(scanTick, 80);
+    }
+
+    try{ var result=reader.decodeBitmap(new Bitmap(new Hybrid(new LumSrc(roiCanvas)))); if(result) handleValue(result.getText()); }
+    catch(e){ /* NotFoundException on most frames — just try the next one */ }
+    next(70);
   }
 
   // Ask for a high-resolution back camera. ZXing decodes off the video's
