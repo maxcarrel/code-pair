@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>CodePair — barcode ↔ QR mapper</title>
+<title>CodePair — SIM ↔ gateway mapper</title>
 <style>
   :root{
     --ink:#12151C; --panel:#1B2029; --panel2:#161A22; --line:#2C333F;
@@ -55,8 +55,10 @@
   .slot.bar .dot{box-shadow:0 0 0 2px rgba(245,166,35,.25)}
   .slot.qr  .dot{border-radius:50%;box-shadow:0 0 0 2px rgba(45,212,207,.25)}
   .slot .val{font-family:var(--mono);font-size:15px;margin-top:7px;word-break:break-all;line-height:1.3;color:var(--muted)}
+  .slot{cursor:pointer}
   .slot.armed{border-style:solid}
-  .slot.bar.armed{border-color:var(--amber)} .slot.qr.armed{border-color:var(--cyan)}
+  .slot.bar.armed{border-color:var(--amber);box-shadow:0 0 0 3px rgba(245,166,35,.22)}
+  .slot.qr.armed{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(45,212,207,.22)}
   .slot.filled{border-style:solid;background:var(--panel2)}
   .slot.bar.filled{border-color:var(--amber)} .slot.bar.filled .dot{background:var(--amber)} .slot.bar.filled .val{color:var(--amber)}
   .slot.qr.filled{border-color:var(--cyan)} .slot.qr.filled .dot{background:var(--cyan)} .slot.qr.filled .val{color:var(--cyan)}
@@ -140,7 +142,7 @@
     <div class="camnote" id="camnote">
       <div>
         <div style="font-size:15px;color:var(--text);font-weight:600;margin-bottom:6px">Camera needed</div>
-        Point the camera at a barcode, then a QR code.<br>Grant access to begin.
+        Scan the SIM card code, then the gateway code.<br>Grant access to begin.
         <br><button id="startBtn">Enable camera</button>
       </div>
     </div>
@@ -148,16 +150,16 @@
 
   <div class="slots">
     <div class="slot bar" id="slotBar">
-      <div class="lab"><span class="dot"></span>Barcode</div>
+      <div class="lab"><span class="dot"></span>SIM card</div>
       <div class="val" id="barVal">waiting…</div>
       <button class="clr" data-slot="bar">clear</button>
     </div>
     <div class="slot qr" id="slotQr">
-      <div class="lab"><span class="dot"></span>QR code</div>
+      <div class="lab"><span class="dot"></span>Gateway</div>
       <div class="val" id="qrVal">waiting…</div>
       <button class="clr" data-slot="qr">clear</button>
     </div>
-    <div class="hint" id="hint">Scan both codes, then tap Save.</div>
+    <div class="hint" id="hint">Tap a slot to choose which code you're scanning.</div>
     <div class="pairactions">
       <button class="primary" id="savePairBtn" disabled>Save mapping</button>
       <button class="ghost" id="newPairBtn" disabled>Scan new</button>
@@ -165,18 +167,18 @@
   </div>
 
   <div class="manualadd" id="manualAdd">
-    <input id="mBar" placeholder="barcode value">
-    <input id="mQr" placeholder="qr value">
+    <input id="mBar" placeholder="SIM card value">
+    <input id="mQr" placeholder="gateway value">
     <button id="mAddBtn">Add</button>
   </div>
 
   <div class="rows" id="rows">
     <div class="empty" id="empty">
       <b>No pairs yet</b>
-      Each item you scan lands here as one row: barcode + QR side by side. Export to CSV when you're done.
+      Each item you scan lands here as one row: SIM card + gateway side by side. Export to CSV when you're done.
     </div>
     <table id="tbl" style="display:none">
-      <thead><tr><th class="idx">#</th><th>Barcode</th><th>QR code</th><th></th></tr></thead>
+      <thead><tr><th class="idx">#</th><th>SIM card</th><th>Gateway</th><th></th></tr></thead>
       <tbody id="tbody"></tbody>
     </table>
   </div>
@@ -191,14 +193,6 @@
     <div class="card">
       <h2>Settings</h2>
       <p class="sub">Tuning for how scans are captured and exported.</p>
-
-      <div class="opt">
-        <div class="txt"><div class="t">Pairing mode</div><div class="d">Auto sorts by code type. Sequence fills barcode then QR in order.</div></div>
-        <div class="seg" id="modeSeg">
-          <button data-mode="auto" class="sel">Auto</button>
-          <button data-mode="sequence">Sequence</button>
-        </div>
-      </div>
 
       <div class="opt">
         <div class="txt"><div class="t">Camera</div><div class="d">Pick the input to scan with.</div></div>
@@ -254,19 +248,20 @@
   var reader = new ZXing.BrowserMultiFormatReader(hints); // we drive our own scan loop below
 
   // ---- state ----
+  // Both codes are barcodes now: "bar" = SIM card (left), "qr" = gateway (right).
+  // The keys stay bar/qr internally so previously saved rows still load.
   var S = {
-    bar:null, qr:null,       // current slot values
+    bar:null, qr:null,       // current slot values (bar=SIM, qr=gateway)
     rows:[],                 // {bar, qr, ts}
-    mode:"auto",             // "auto" | "sequence"
-    seqStep:"bar",           // for sequence mode
+    active:"bar",            // which slot the next scan fills: "bar" (SIM) | "qr" (gateway)
     sound:true, vibe:true, stamp:false,
     devices:[], deviceId:null, running:false, track:null, torchOn:false
   };
   var LS = "codepair.v1";
 
   // ---- persistence (degrades silently where storage is blocked) ----
-  function save(){ try{ localStorage.setItem(LS, JSON.stringify({rows:S.rows,mode:S.mode,sound:S.sound,vibe:S.vibe,stamp:S.stamp,deviceId:S.deviceId})); }catch(e){} }
-  function load(){ try{ var d=JSON.parse(localStorage.getItem(LS)); if(d){ S.rows=d.rows||[]; S.mode=d.mode||"auto"; S.sound=d.sound!==false; S.vibe=d.vibe!==false; S.stamp=!!d.stamp; S.deviceId=d.deviceId||null; } }catch(e){} }
+  function save(){ try{ localStorage.setItem(LS, JSON.stringify({rows:S.rows,sound:S.sound,vibe:S.vibe,stamp:S.stamp,deviceId:S.deviceId})); }catch(e){} }
+  function load(){ try{ var d=JSON.parse(localStorage.getItem(LS)); if(d){ S.rows=d.rows||[]; S.sound=d.sound!==false; S.vibe=d.vibe!==false; S.stamp=!!d.stamp; S.deviceId=d.deviceId||null; } }catch(e){} }
 
   // ---- dom ----
   var $=function(id){return document.getElementById(id)};
@@ -292,46 +287,40 @@
 
   // ---- slot rendering ----
   function renderSlots(){
-    // barcode
+    // SIM card (left)
     slotBar.classList.toggle("filled", !!S.bar);
     barVal.textContent = S.bar || "waiting…";
-    // qr
+    // gateway (right)
     slotQr.classList.toggle("filled", !!S.qr);
     qrVal.textContent = S.qr || "waiting…";
     // action buttons: Save enabled only with a full pair, Scan new whenever a slot holds something
     var both = !!(S.bar && S.qr), any = !!(S.bar || S.qr);
     savePairBtn.disabled = !both;
     newPairBtn.disabled = !any;
-    // armed indicator in sequence mode
-    slotBar.classList.remove("armed"); slotQr.classList.remove("armed");
+    // highlight the slot the scanner is currently targeting
+    slotBar.classList.toggle("armed", S.active==="bar");
+    slotQr.classList.toggle("armed", S.active==="qr");
     if(both){
-      hint.textContent = "Both captured — tap Save mapping to store it.";
-    } else if(S.mode==="sequence"){
-      if(S.seqStep==="bar" && !S.bar) slotBar.classList.add("armed");
-      if(S.seqStep==="qr"  && !S.qr)  slotQr.classList.add("armed");
-      hint.textContent = "Sequence mode — scan the "+(S.seqStep==="bar"?"barcode":"QR code")+" next.";
+      hint.textContent = "Both captured — tap Save, or tap a slot to re-scan it.";
     } else {
-      hint.textContent = "Scan both codes, then tap Save.";
+      hint.textContent = "Scanning "+(S.active==="bar"?"SIM card":"Gateway")+" — tap the other slot to switch.";
     }
   }
+
+  // Choose which slot the next scan fills.
+  function setActive(which){ S.active=which; last.val=null; last.at=0; renderSlots(); }
 
   // ---- decoding callback ----
   var last={val:null, at:0};
   function onDecode(result){
     if(!result) return;
     var text = result.getText();
-    var fmt = result.getBarcodeFormat();
-    var isQR = (fmt===BF.QR_CODE || fmt===BF.DATA_MATRIX || fmt===BF.AZTEC || fmt===BF.PDF_417);
     var now = Date.now();
     // debounce identical rapid reads
     if(text===last.val && now-last.at<1200) return;
 
-    var target; // "bar" or "qr"
-    if(S.mode==="sequence"){
-      target = S.seqStep;
-    } else {
-      target = isQR ? "qr" : "bar";
-    }
+    // both codes are barcodes, so the value goes into whichever slot is selected
+    var target = S.active;
 
     // ignore if that slot already holds this exact value
     if(target==="bar" && S.bar===text) return;
@@ -343,24 +332,22 @@
     else { S.qr=text; beep(980,0.07); }
     buzz(25);
 
-    if(S.mode==="sequence"){
-      S.seqStep = (S.seqStep==="bar") ? "qr" : "bar";
-    }
+    // sequence: after filling one slot, advance to the other if it's still empty
+    if(target==="bar" && !S.qr) S.active="qr";
+    else if(target==="qr" && !S.bar) S.active="bar";
     renderSlots();
   }
 
   // Discard the working slots without saving — start a fresh scan.
   function clearSlots(){
-    S.bar=null; S.qr=null;
-    if(S.mode==="sequence") S.seqStep="bar";
+    S.bar=null; S.qr=null; S.active="bar";
     last.val=null; last.at=0;
     renderSlots();
   }
 
   function commitRow(){
     S.rows.push({bar:S.bar, qr:S.qr, ts:new Date().toISOString()});
-    S.bar=null; S.qr=null;
-    if(S.mode==="sequence") S.seqStep="bar";
+    S.bar=null; S.qr=null; S.active="bar";
     last.val=null; last.at=0;
     // feedback
     flash.classList.remove("go"); void flash.offsetWidth; flash.classList.add("go");
@@ -398,13 +385,17 @@
     S.rows.splice(+b.dataset.del,1); renderRows(); save();
   });
 
-  // clear a slot manually
+  // tap a slot to choose which code we're scanning
+  slotBar.addEventListener("click",function(){ setActive("bar"); });
+  slotQr.addEventListener("click",function(){ setActive("qr"); });
+
+  // clear a slot manually (and target it for a re-scan)
   document.querySelectorAll(".clr").forEach(function(b){
-    b.addEventListener("click",function(){
+    b.addEventListener("click",function(e){
+      e.stopPropagation();
       var s=b.dataset.slot;
-      if(s==="bar"){ S.bar=null; if(S.mode==="sequence") S.seqStep="bar"; }
-      else { S.qr=null; if(S.mode==="sequence") S.seqStep="qr"; }
-      last.val=null; renderSlots();
+      if(s==="bar") S.bar=null; else S.qr=null;
+      S.active=s; last.val=null; last.at=0; renderSlots();
     });
   });
 
@@ -415,7 +406,7 @@
   // ---- CSV export ----
   function csvCell(v){ v=(v==null?"":String(v)); return /[",\n\r]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
   function exportCSV(){
-    var head = S.stamp ? ["barcode","qr_code","timestamp"] : ["barcode","qr_code"];
+    var head = S.stamp ? ["sim_card","gateway","timestamp"] : ["sim_card","gateway"];
     var lines=[head.map(csvCell).join(",")];
     S.rows.forEach(function(r){
       var row = S.stamp ? [r.bar,r.qr,r.ts] : [r.bar,r.qr];
@@ -571,19 +562,11 @@
   sw($("swVibe"),S.vibe,function(v){S.vibe=v; if(v)buzz(40);});
   sw($("swStamp"),S.stamp,function(v){S.stamp=v;});
 
-  document.querySelectorAll("#modeSeg button").forEach(function(b){
-    b.addEventListener("click",function(){
-      document.querySelectorAll("#modeSeg button").forEach(function(x){x.classList.remove("sel")});
-      b.classList.add("sel"); S.mode=b.dataset.mode; S.seqStep="bar"; save(); renderSlots();
-    });
-  });
-
   // ---- init ----
   function syncUIFromState(){
     $("swSound").classList.toggle("on",S.sound);
     $("swVibe").classList.toggle("on",S.vibe);
     $("swStamp").classList.toggle("on",S.stamp);
-    document.querySelectorAll("#modeSeg button").forEach(function(x){ x.classList.toggle("sel", x.dataset.mode===S.mode); });
   }
   load(); syncUIFromState(); renderSlots(); renderRows();
 
