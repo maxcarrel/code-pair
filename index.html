@@ -429,23 +429,58 @@
   // ---- camera control ----
   function stop(){ try{reader.reset()}catch(e){} S.running=false; S.track=null; S.torchOn=false; torchBtn.classList.remove("on"); }
 
+  // Ask for a high-resolution back camera. ZXing decodes off the video's
+  // intrinsic frame, so a bigger stream = sharper source = better reads.
+  function buildConstraints(deviceId){
+    var v = {
+      width:  { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 30 }
+    };
+    if(deviceId){ v.deviceId = { exact: deviceId }; }
+    else { v.facingMode = { ideal: "environment" }; }
+    return { audio:false, video:v };
+  }
+
+  // Nudge the camera toward continuous autofocus — barcodes go blurry up close otherwise.
+  function tuneTrack(track){
+    if(!track) return;
+    try{
+      var caps = track.getCapabilities && track.getCapabilities();
+      if(caps && caps.focusMode && caps.focusMode.indexOf("continuous")!==-1){
+        track.applyConstraints({advanced:[{focusMode:"continuous"}]}).catch(function(){});
+      }
+    }catch(e){}
+  }
+
+  function onCameraReady(){
+    camnote.style.display="none";
+    S.running=true;
+    var stream=video.srcObject;
+    if(stream){
+      S.track=stream.getVideoTracks()[0];
+      tuneTrack(S.track);
+      try{ var caps=S.track.getCapabilities&&S.track.getCapabilities(); if(caps&&caps.torch) torchBtn.style.display="block"; }catch(e){}
+    }
+    refreshDevices();
+  }
+
+  function cameraFailed(e){
+    camnote.style.display="grid";
+    camnote.querySelector("div div").textContent = "Camera unavailable: "+(e&&e.message?e.message:e)+". If you opened this file directly, try Chrome, or serve it over http/https.";
+  }
+
   function start(deviceId){
     stop();
-    reader.decodeFromVideoDevice(deviceId||null, video, function(result,err){
-      if(result) onDecode(result);
-    }).then(function(){
-      camnote.style.display="none";
-      S.running=true;
-      // grab track for torch/labels
-      var stream=video.srcObject;
-      if(stream){ S.track=stream.getVideoTracks()[0];
-        try{ var caps=S.track.getCapabilities&&S.track.getCapabilities(); if(caps&&caps.torch) torchBtn.style.display="block"; }catch(e){}
-      }
-      refreshDevices();
-    }).catch(function(e){
-      camnote.style.display="grid";
-      camnote.querySelector("div div").textContent = "Camera unavailable: "+(e&&e.message?e.message:e)+". If you opened this file directly, try Chrome, or serve it over http/https.";
-    });
+    var cb=function(result,err){ if(result) onDecode(result); };
+    reader.decodeFromConstraints(buildConstraints(deviceId), video, cb)
+      .then(onCameraReady)
+      .catch(function(e){
+        // High-res request rejected (e.g. OverconstrainedError) — fall back to defaults.
+        reader.decodeFromVideoDevice(deviceId||null, video, cb)
+          .then(onCameraReady)
+          .catch(cameraFailed);
+      });
   }
 
   function refreshDevices(){
