@@ -63,6 +63,10 @@
   .slot .clr{position:absolute;top:8px;right:8px;font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:2px 6px;display:none}
   .slot.filled .clr{display:block}
   .hint{grid-column:1/-1;text-align:center;font-size:12px;color:var(--muted);margin-top:-2px}
+  .pairactions{grid-column:1/-1;display:flex;gap:10px;margin-top:2px}
+  .pairactions .primary{flex:1;padding:12px;border-radius:11px;font-weight:700;font-size:14px}
+  .pairactions .ghost{flex:0 0 auto;padding:12px 16px;border-radius:11px;font-weight:700;font-size:14px}
+  .pairactions button:disabled{opacity:.5}
 
   /* table */
   .rows{flex:1 1 auto;overflow-y:auto;border-top:1px solid var(--line);-webkit-overflow-scrolling:touch}
@@ -153,7 +157,11 @@
       <div class="val" id="qrVal">waiting…</div>
       <button class="clr" data-slot="qr">clear</button>
     </div>
-    <div class="hint" id="hint">Scan both codes — the row saves itself.</div>
+    <div class="hint" id="hint">Scan both codes, then tap Save.</div>
+    <div class="pairactions">
+      <button class="primary" id="savePairBtn" disabled>Save mapping</button>
+      <button class="ghost" id="newPairBtn" disabled>Scan new</button>
+    </div>
   </div>
 
   <div class="manualadd" id="manualAdd">
@@ -262,6 +270,7 @@
   var $=function(id){return document.getElementById(id)};
   var video=$("video"), flash=$("flash"), camnote=$("camnote"), torchBtn=$("torchBtn");
   var slotBar=$("slotBar"), slotQr=$("slotQr"), barVal=$("barVal"), qrVal=$("qrVal"), hint=$("hint");
+  var savePairBtn=$("savePairBtn"), newPairBtn=$("newPairBtn");
   var tbody=$("tbody"), tbl=$("tbl"), empty=$("empty"), cnt=$("cnt");
   var exportBtn=$("exportBtn"), clearBtn=$("clearBtn");
 
@@ -287,14 +296,20 @@
     // qr
     slotQr.classList.toggle("filled", !!S.qr);
     qrVal.textContent = S.qr || "waiting…";
+    // action buttons: Save enabled only with a full pair, Scan new whenever a slot holds something
+    var both = !!(S.bar && S.qr), any = !!(S.bar || S.qr);
+    savePairBtn.disabled = !both;
+    newPairBtn.disabled = !any;
     // armed indicator in sequence mode
     slotBar.classList.remove("armed"); slotQr.classList.remove("armed");
-    if(S.mode==="sequence"){
+    if(both){
+      hint.textContent = "Both captured — tap Save mapping to store it.";
+    } else if(S.mode==="sequence"){
       if(S.seqStep==="bar" && !S.bar) slotBar.classList.add("armed");
       if(S.seqStep==="qr"  && !S.qr)  slotQr.classList.add("armed");
       hint.textContent = "Sequence mode — scan the "+(S.seqStep==="bar"?"barcode":"QR code")+" next.";
     } else {
-      hint.textContent = "Scan both codes — the row saves itself.";
+      hint.textContent = "Scan both codes, then tap Save.";
     }
   }
 
@@ -330,13 +345,14 @@
       S.seqStep = (S.seqStep==="bar") ? "qr" : "bar";
     }
     renderSlots();
-    maybeCommit();
   }
 
-  function maybeCommit(){
-    if(S.bar && S.qr){
-      commitRow();
-    }
+  // Discard the working slots without saving — start a fresh scan.
+  function clearSlots(){
+    S.bar=null; S.qr=null;
+    if(S.mode==="sequence") S.seqStep="bar";
+    last.val=null; last.at=0;
+    renderSlots();
   }
 
   function commitRow(){
@@ -389,6 +405,10 @@
       last.val=null; renderSlots();
     });
   });
+
+  // save the current pair, or discard it and scan a new one
+  savePairBtn.addEventListener("click",function(){ if(S.bar && S.qr) commitRow(); });
+  newPairBtn.addEventListener("click",clearSlots);
 
   // ---- CSV export ----
   function csvCell(v){ v=(v==null?"":String(v)); return /[",\n\r]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
