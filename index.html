@@ -464,19 +464,34 @@
 
   function next(ms){ if(S.running) scanTimer=setTimeout(scanTick, ms); }
 
-  // Grab the centered region of the frame into a canvas, downscaled so neither
-  // decoder chews through more pixels than a 1D barcode needs. Returns false if
-  // the video isn't ready yet.
+  // Map the on-screen scan frame to the video's intrinsic pixels, undoing the
+  // object-fit:cover scale/crop, so we decode exactly what's inside the reticle.
+  var frameEl=document.querySelector(".reticle .frame");
+  function frameROI(vw, vh){
+    var er=video.getBoundingClientRect(), fr=frameEl.getBoundingClientRect();
+    var elW=er.width, elH=er.height;
+    if(!elW || !elH) return null;
+    var cover=Math.max(elW/vw, elH/vh);                 // how the stream is scaled to cover the box
+    var offX=(elW-vw*cover)/2, offY=(elH-vh*cover)/2;   // clipped overflow, centered
+    var rx=(fr.left-er.left-offX)/cover, ry=(fr.top-er.top-offY)/cover;
+    var rw=fr.width/cover, rh=fr.height/cover;
+    // clamp inside the frame
+    rx=Math.max(0,Math.min(vw-1,rx)); ry=Math.max(0,Math.min(vh-1,ry));
+    rw=Math.max(1,Math.min(vw-rx,rw)); rh=Math.max(1,Math.min(vh-ry,rh));
+    return {rx:rx, ry:ry, rw:rw, rh:rh};
+  }
+
+  // Grab the reticle region into a canvas, downscaled so neither decoder chews
+  // through more pixels than a 1D barcode needs. False if the video isn't ready.
   var MAXW=1000;
   function grabROI(){
     var vw=video.videoWidth, vh=video.videoHeight;
     if(!(vw && vh && video.readyState>=2)) return false;
-    var rw=Math.round(vw*0.82), rh=Math.round(vh*0.60);       // central region of interest
-    var rx=(vw-rw)>>1, ry=(vh-rh)>>1;
-    var sc=Math.min(1, MAXW/rw), cw=Math.round(rw*sc), ch=Math.round(rh*sc);
+    var r=frameROI(vw,vh); if(!r) return false;
+    var sc=Math.min(1, MAXW/r.rw), cw=Math.max(1,Math.round(r.rw*sc)), ch=Math.max(1,Math.round(r.rh*sc));
     if(!roiCanvas){ roiCanvas=document.createElement("canvas"); roiCtx=roiCanvas.getContext("2d",{willReadFrequently:true}); }
     if(roiCanvas.width!==cw||roiCanvas.height!==ch){ roiCanvas.width=cw; roiCanvas.height=ch; }
-    roiCtx.drawImage(video, rx,ry,rw,rh, 0,0,cw,ch);
+    roiCtx.drawImage(video, r.rx,r.ry,r.rw,r.rh, 0,0,cw,ch);
     return true;
   }
 
